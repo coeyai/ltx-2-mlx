@@ -10,6 +10,7 @@ import mlx.utils
 import pytest
 
 from ltx_core_mlx.model.video_vae.diffusion_decoder import NADiffusionDecoder, load_diffusion_decoder
+from ltx_core_mlx.model.video_vae.diffusion_decoder.config import LTX_2_5_DIFFUSION_DECODER
 from tests.conftest import LTX25_Q8_DIR
 from tests.diffvae_tiny import TINY
 
@@ -54,6 +55,25 @@ def test_injected_noise_bypasses_the_rng():
     z = mx.random.normal((1, 8, 3, 3, 3))
     noise = mx.random.normal((1, 3, 17, 96, 96))
     assert mx.array_equal(dec.decode(z, noise=noise), dec.decode(z, noise=noise))
+    # Explicit noise makes `seed` irrelevant.
+    assert mx.array_equal(dec.decode(z, noise=noise, seed=1), dec.decode(z, noise=noise, seed=2))
+
+
+def test_decode_rejects_batch_and_bad_noise_shape():
+    dec = NADiffusionDecoder(TINY)
+    z = mx.random.normal((2, 8, 3, 3, 3))
+    with pytest.raises(ValueError):
+        dec.decode(z)
+    z1 = mx.random.normal((1, 8, 3, 3, 3))
+    bad_noise = mx.random.normal((1, 3, 16, 96, 96))  # wrong T
+    with pytest.raises(ValueError):
+        dec.decode(z1, noise=bad_noise)
+
+
+def test_pixel_scales_derived_from_config():
+    dec = NADiffusionDecoder(LTX_2_5_DIFFUSION_DECODER)
+    assert dec.temporal_scale == 8
+    assert dec.spatial_scale == (32, 32)
 
 
 def test_parameter_names_match_the_pack_schema():

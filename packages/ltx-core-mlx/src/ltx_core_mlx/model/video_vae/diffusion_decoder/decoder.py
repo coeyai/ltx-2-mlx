@@ -28,10 +28,11 @@ from ltx_core_mlx.utils.weights import load_split_safetensors
 
 #: Decorrelates the decoder's noise draw from the sampler's (which reuses ``seed``).
 DIFFVAE_NOISE_SEED_OFFSET = 30000
-TEMPORAL_SCALE, SPATIAL_SCALE = 8, 32
 
 
 class PerChannelStats(nn.Module):
+    """Per-channel de-normalisation statistics (``mean``, ``std``) for the input latent."""
+
     def __init__(self, channels: int) -> None:
         super().__init__()
         self.mean = mx.zeros((channels,))
@@ -47,6 +48,9 @@ class NADiffusionDecoder(nn.Module):
         c = config
         self.per_channel_statistics = PerChannelStats(c.in_channels)
         self.conv_in = nn.Linear(c.in_channels, c.stage_channels[0])
+        # Added by upstream only to keyframe latents in the keyframe-aware decode
+        # (DecodeKeyframes); the plain decode never reads it. Loaded for the load
+        # contract; inert in v1.
         self.type_emb = mx.zeros((c.in_channels,))
         self.det_stages = [
             [NABlock(c.stage_channels[s], c.head_dim, c.stage_kernels[s]) for _ in range(c.stage_depths[s])]
@@ -66,6 +70,10 @@ class NADiffusionDecoder(nn.Module):
         ]
         self.norm_out = RMSNorm(c.diff_channels)
         self.conv_out = nn.Linear(c.diff_channels, c.out_channels * pp)
+
+        st, sh, sw = c.cumulative_strides()[4]
+        self.temporal_scale = st
+        self.spatial_scale = (sh * c.patch_size, sw * c.patch_size)
 
     # ---- geometry -----------------------------------------------------------------
     def denormalize_latent(self, z: mx.array) -> mx.array:
@@ -139,23 +147,27 @@ class NADiffusionDecoder(nn.Module):
         if latent.shape[0] != 1:
             raise ValueError("NADiffusionDecoder decodes one video at a time (batch size 1)")
         _, _, f, h, w = latent.shape
-        padded, (t_pad, h_b, _h_a, w_b, _w_a) = self.pad_to_floor(latent)
+        # T pads live at the end (repeat-last-frame) and are removed by the [:f_px] crop below.
+        padded, (_t_pad, h_b, _h_a, w_b, _w_a) = self.pad_to_floor(latent)
         feat = self.forward_stages_1_to_4(padded)
         t4, h4, w4 = feat.shape[1], feat.shape[2], feat.shape[3]
         canvas = self.stage5_canvas(t4, h4, w4)
         if noise is None:
-            mx.random.seed(seed + DIFFVAE_NOISE_SEED_OFFSET)
-            noise = mx.random.normal((1, self.config.out_channels, *canvas))
+            key = mx.random.key(seed + DIFFVAE_NOISE_SEED_OFFSET)
+            noise = mx.random.normal((1, self.config.out_channels, *canvas), key=key)
         elif tuple(noise.shape) != (1, self.config.out_channels, *canvas):
             raise ValueError(f"noise must have shape {(1, self.config.out_channels, *canvas)}, got {noise.shape}")
         pixels = self.forward_stage_5(noise.astype(latent.dtype), feat, mx.array([1.0]))
-        f_px, h_px, w_px = (f - 1) * TEMPORAL_SCALE + 1, h * SPATIAL_SCALE, w * SPATIAL_SCALE
-        hb, wb = h_b * SPATIAL_SCALE, w_b * SPATIAL_SCALE
-        del t_pad  # T pads live at the end and are removed by the [:f_px] crop
+        sh, sw = self.spatial_scale
+        f_px, h_px, w_px = (f - 1) * self.temporal_scale + 1, h * sh, w * sw
+        hb, wb = h_b * sh, w_b * sw
         return pixels[:, :, :f_px, hb : hb + h_px, wb : wb + w_px]
 
-    def tiled_decode(self, latent: mx.array, tiling=None, *, seed: int = 0) -> Iterator[mx.array]:
-        """Single-tile decode yielding one ``(B, 3, F, H, W)`` chunk (API parity with the conv decoder; tiling lands in PR B)."""
+    def tiled_decode(self, latent: mx.array, tiling: object | None = None, *, seed: int = 0) -> Iterator[mx.array]:
+        """Single-tile decode yielding one ``(B, 3, F, H, W)`` chunk.
+
+        API parity with the conv decoder; ``tiling`` is accepted but ignored until PR B.
+        """
         del tiling
         yield self.decode(latent, seed=seed)
 
