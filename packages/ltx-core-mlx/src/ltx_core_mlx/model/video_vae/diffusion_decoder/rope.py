@@ -11,8 +11,12 @@ import numpy as np
 
 
 def rope_dim_split(head_dim: int) -> tuple[int, int, int]:
-    d_t = max((head_dim // 4) // 2 * 2, 2)
+    d_t = (head_dim // 4) // 2 * 2
     d_hw = (head_dim - d_t) // 2
+    if d_hw % 2 == 1:
+        raise ValueError(
+            f"head_dim {head_dim} gives an odd RoPE split {(d_t, d_hw, d_hw)}; interleaved rotation needs even dims"
+        )
     return d_t, d_hw, d_hw
 
 
@@ -24,21 +28,13 @@ def inv_freqs(dim: int) -> mx.array:
 
 def _rotate(x: mx.array, angle: mx.array) -> mx.array:
     """Rotate interleaved pairs of the last axis of ``x`` by ``angle`` (broadcastable to ``x[..., ::2]``)."""
-    d = x.shape[-1]
-    is_odd = d % 2 == 1
-
-    if is_odd:
-        x = mx.concatenate([x, mx.zeros_like(x[..., :1])], axis=-1)
+    if x.shape[-1] == 0:
+        return x
 
     xe, xo = x[..., 0::2], x[..., 1::2]
     cos, sin = mx.cos(angle), mx.sin(angle)
     re, ro = xe * cos - xo * sin, xe * sin + xo * cos
-    out = mx.stack([re, ro], axis=-1).reshape(x.shape)
-
-    if is_odd:
-        out = out[..., :d]
-
-    return out
+    return mx.stack([re, ro], axis=-1).reshape(x.shape)
 
 
 def apply_axial_rope(
