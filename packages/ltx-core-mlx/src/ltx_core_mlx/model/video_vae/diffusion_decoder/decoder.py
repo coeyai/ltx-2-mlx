@@ -8,7 +8,7 @@ pure-noise ``x_t`` -> one diffusion step at ``t = 1`` (``x0`` output is the pixe
 from __future__ import annotations
 
 import math
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import mlx.core as mx
@@ -117,8 +117,14 @@ class NADiffusionDecoder(nn.Module):
         return t4_kept * st - 1, h4 * sh * p, w4 * sw * p
 
     # ---- forward pieces -----------------------------------------------------------
-    def forward_stages_1_to_4(self, latent_padded: mx.array) -> mx.array:
-        """De-normalise, ghost-pad, run det stages 1-4 (upsample 3 deferred), crop the ghost context."""
+    def forward_stages_1_to_4(
+        self, latent_padded: mx.array, *, tap: Callable[[str, mx.array], None] | None = None
+    ) -> mx.array:
+        """De-normalise, ghost-pad, run det stages 1-4 (upsample 3 deferred), crop the ghost context.
+
+        ``tap``, when given, receives ``("s{s+1}.out", x)`` after the last block of stage ``s``
+        (before that stage's upsample) -- the parity boundaries of the torch goldens.
+        """
         z = self.denormalize_latent(latent_padded)
         ghost = self.config.ghost_pad_frames()
         z = mx.concatenate([z, mx.repeat(z[:, :, -1:], ghost, axis=2)], axis=2)
@@ -126,30 +132,55 @@ class NADiffusionDecoder(nn.Module):
         for s in range(self.config.num_det_stages):
             for block in self.det_stages[s]:
                 x = block(x)
+            if tap is not None:
+                tap(f"s{s + 1}.out", x)
             if s < 3:
                 x = self.upsamples[s](x, drop_leading_frame=True)
         keep = self._ghost_crop_keep(x.shape[1])
         return x[:, :keep]
 
-    def forward_stage_5(self, x_t: mx.array, stage4_feat: mx.array, t: mx.array) -> mx.array:
-        """One diffusion evaluation at timestep ``t`` (``(B,)``); returns pixels ``(B, 3, F5, H_px, W_px)``."""
+    def forward_stage_5(
+        self,
+        x_t: mx.array,
+        stage4_feat: mx.array,
+        t: mx.array,
+        *,
+        tap: Callable[[str, mx.array], None] | None = None,
+    ) -> mx.array:
+        """One diffusion evaluation at timestep ``t`` (``(B,)``); returns pixels ``(B, 3, F5, H_px, W_px)``.
+
+        ``tap``, when given, receives ``("s5.b{i}.out", x)`` after each diffusion block.
+        """
         x = self.conv_in_x_t(patchify_pixels(x_t, self.config.patch_size))
         t_emb = self.t_embedder(t * self.config.timestep_scale_multiplier)
         modulation = self.shared_adaln(t_emb)
-        for block in self.diff_blocks:
+        for i, block in enumerate(self.diff_blocks):
             x = block(x, stage4_feat, self.upsamples[3], modulation, drop_leading_frame=True)
+            if tap is not None:
+                tap(f"s5.b{i}.out", x)
         x = self.conv_out(self.norm_out(x))
         return unpatchify_pixels(x, self.config.patch_size, self.config.out_channels)
 
     # ---- public API ---------------------------------------------------------------
-    def decode(self, latent: mx.array, *, noise: mx.array | None = None, seed: int = 0) -> mx.array:
-        """Decode ``(B, 128, F, H, W)`` normalised latent to ``(B, 3, 8F-7, 32H, 32W)`` pixels in ``[-1, 1]``."""
+    def decode(
+        self,
+        latent: mx.array,
+        *,
+        noise: mx.array | None = None,
+        seed: int = 0,
+        tap: Callable[[str, mx.array], None] | None = None,
+    ) -> mx.array:
+        """Decode ``(B, 128, F, H, W)`` normalised latent to ``(B, 3, 8F-7, 32H, 32W)`` pixels in ``[-1, 1]``.
+
+        ``tap`` is the parity instrumentation hook; see :meth:`forward_stages_1_to_4` and
+        :meth:`forward_stage_5` for the names it is called with.
+        """
         if latent.shape[0] != 1:
             raise ValueError("NADiffusionDecoder decodes one video at a time (batch size 1)")
         _, _, f, h, w = latent.shape
         # T pads live at the end (repeat-last-frame) and are removed by the [:f_px] crop below.
         padded, (_t_pad, h_b, _h_a, w_b, _w_a) = self.pad_to_floor(latent)
-        feat = self.forward_stages_1_to_4(padded)
+        feat = self.forward_stages_1_to_4(padded, tap=tap)
         t4, h4, w4 = feat.shape[1], feat.shape[2], feat.shape[3]
         canvas = self.stage5_canvas(t4, h4, w4)
         if noise is None:
@@ -157,7 +188,7 @@ class NADiffusionDecoder(nn.Module):
             noise = mx.random.normal((1, self.config.out_channels, *canvas), key=key)
         elif tuple(noise.shape) != (1, self.config.out_channels, *canvas):
             raise ValueError(f"noise must have shape {(1, self.config.out_channels, *canvas)}, got {noise.shape}")
-        pixels = self.forward_stage_5(noise.astype(latent.dtype), feat, mx.array([1.0]))
+        pixels = self.forward_stage_5(noise.astype(latent.dtype), feat, mx.array([1.0]), tap=tap)
         sh, sw = self.spatial_scale
         f_px, h_px, w_px = (f - 1) * self.temporal_scale + 1, h * sh, w * sw
         hb, wb = h_b * sh, w_b * sw
