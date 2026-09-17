@@ -354,6 +354,18 @@ examples:
             "only the audio VAE / vocoder load and decode are skipped."
         ),
     )
+    from ltx_pipelines_mlx.utils.blocks import VIDEO_DECODER_CHOICES
+
+    gen.add_argument(
+        "--video-decoder",
+        choices=VIDEO_DECODER_CHOICES,
+        default="conv",
+        help=(
+            "[experimental] Video VAE decoder: 'conv' (default) or 'diffusion' "
+            "(LTX 2.5 NADiffusionDecoder, sharper, slower, single-tile; needs "
+            "vae_decoder_av.safetensors)"
+        ),
+    )
     gen.add_argument(
         "--auto-duration",
         type=_parse_auto_duration,
@@ -957,6 +969,7 @@ def _cmd_generate(args: argparse.Namespace) -> None:
         pipe.verbose = not args.quiet
         pipe.stepwise = _build_stepwise(args)
         pipe.generate_audio = not args.no_audio
+        pipe.video_decoder = args.video_decoder
         if lora_paths:
             pipe._pending_loras = lora_paths
         kwargs: dict = dict(
@@ -1000,6 +1013,7 @@ def _cmd_generate(args: argparse.Namespace) -> None:
         pipe.verbose = not args.quiet
         pipe.stepwise = _build_stepwise(args)
         pipe.generate_audio = not args.no_audio
+        pipe.video_decoder = args.video_decoder
         if lora_paths:
             pipe._pending_loras = lora_paths
         kwargs: dict = dict(
@@ -1048,6 +1062,7 @@ def _cmd_generate(args: argparse.Namespace) -> None:
         pipe.verbose = not args.quiet
         pipe.stepwise = _build_stepwise(args)
         pipe.generate_audio = not args.no_audio
+        pipe.video_decoder = args.video_decoder
         if lora_paths:
             pipe._pending_loras = lora_paths
         # two-stage / HQ accept the upstream-iso multi-image conditioning list.
