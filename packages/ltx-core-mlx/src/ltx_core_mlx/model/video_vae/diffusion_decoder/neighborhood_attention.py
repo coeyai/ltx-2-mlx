@@ -107,41 +107,41 @@ def na3d(
 
     out = mx.zeros_like(q)
 
+    # Per-axis query indices, slab indices and window masks depend only on the axis and the
+    # block index along that axis, so build them once per axis instead of once per 3-D block.
+    axis_qi: list[list[mx.array]] = []
+    axis_si: list[list[mx.array]] = []
+    axis_mask: list[list[mx.array]] = []
+    for axis in range(3):
+        q0s, s0s, bsize, slab = plans[axis]
+        ll = lengths[axis]
+        qis, sis, masks_axis = [], [], []
+        for q0, s0 in zip(q0s, s0s, strict=True):
+            qi = mx.arange(bsize) + q0
+            qi = mx.minimum(qi, ll - 1)  # last block on a non-divisible axis clamps in-bounds
+            si = mx.arange(slab) + s0
+            ws = starts[axis][qi]  # window start per query on this axis, shape (bsize,)
+            qis.append(qi)
+            sis.append(si)
+            masks_axis.append((si[None, :] >= ws[:, None]) & (si[None, :] < (ws + k_eff[axis])[:, None]))
+        axis_qi.append(qis)
+        axis_si.append(sis)
+        axis_mask.append(masks_axis)
+
     block_ids = list(itertools.product(*[range(len(p[0])) for p in plans]))
     for group_start in range(0, len(block_ids), max_blocks):
         group = block_ids[group_start : group_start + max_blocks]
 
         q_indices: list[tuple[mx.array, mx.array, mx.array]] = []
+        s_indices: list[tuple[mx.array, mx.array, mx.array]] = []
         masks = []
         for bi in group:
-            per_axis_q = []
-            per_axis_mask = []
-            for axis in range(3):
-                q0s, s0s, bsize, slab = plans[axis]
-                q0, s0 = q0s[bi[axis]], s0s[bi[axis]]
-                ll = lengths[axis]
-                qi = mx.arange(bsize) + q0
-                qi = mx.minimum(qi, ll - 1)  # last block on a non-divisible axis clamps in-bounds
-                si = mx.arange(slab) + s0
-                ws = starts[axis][qi]  # window start per query on this axis, shape (bsize,)
-                axis_mask = (si[None, :] >= ws[:, None]) & (si[None, :] < (ws + k_eff[axis])[:, None])
-                per_axis_q.append(qi)
-                per_axis_mask.append(axis_mask)
-            q_indices.append(tuple(per_axis_q))
-            mt, mh, mw = per_axis_mask
-            full_mask = (
+            q_indices.append(tuple(axis_qi[axis][bi[axis]] for axis in range(3)))
+            s_indices.append(tuple(axis_si[axis][bi[axis]] for axis in range(3)))
+            mt, mh, mw = (axis_mask[axis][bi[axis]] for axis in range(3))
+            masks.append(
                 mt[:, None, None, :, None, None] & mh[None, :, None, None, :, None] & mw[None, None, :, None, None, :]
             )
-            masks.append(full_mask)
-
-        s_indices = []
-        for bi in group:
-            per_axis_s = []
-            for axis in range(3):
-                _, s0s, _, slab = plans[axis]
-                s0 = s0s[bi[axis]]
-                per_axis_s.append(mx.arange(slab) + s0)
-            s_indices.append(tuple(per_axis_s))
 
         qg = mx.stack([_gather_grid(q, *qi) for qi in q_indices])  # (G, Lq, heads, head_dim)
         kg = mx.stack([_gather_grid(k, *si) for si in s_indices])  # (G, Lk, heads, head_dim)
@@ -164,5 +164,9 @@ def na3d(
             out[0, ti[:, None, None], hi[None, :, None], wi[None, None, :]] = og[gi].reshape(
                 bt, bh, bw, heads, head_dim
             )
+        # Materialize the accumulator so live Metal buffers stay bounded by one block group;
+        # without this the buffer count grows with the total query-block count and trips the
+        # driver's resource limit at stage-5 sizes. Numerically inert.
+        mx.eval(out)
 
     return out

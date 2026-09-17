@@ -317,7 +317,6 @@ def stream_chunks_to_ffmpeg(chunks: Iterator[mx.array], proc: subprocess.Popen[b
     """
     assert proc.stdin is not None
     frame_writer = _OrderedFrameWriter(proc.stdin, overlap=_media_write_overlap_enabled())
-    completed_frames = 0
     try:
         for chunk in chunks:  # (B, 3, T, H, W)
             num_frames = chunk.shape[2]
@@ -331,7 +330,6 @@ def stream_chunks_to_ffmpeg(chunks: Iterator[mx.array], proc: subprocess.Popen[b
                 del frame, frame_hwc
                 if i % 8 == 0:
                     aggressive_cleanup()
-            completed_frames += num_frames
             del chunk
             aggressive_cleanup()
         frame_writer.finish()
