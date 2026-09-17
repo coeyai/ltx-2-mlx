@@ -1097,19 +1097,22 @@ Reproduces upstream's **default** `chunked_eager` mode exactly: stage-5 attentio
 width slabs with a 5-cell halo, edge-replicated at the true image borders (the first/last 20 px
 of each row differ from full-volume attention — same as upstream). Neighborhood attention is exact
 blocked dense attention with a boolean window mask (`diffusion_decoder/neighborhood_attention.py`).
-Single tile in v1: `LTX2_DIFFVAE_MAX_TOKENS` (default 2.5 M stage-5 tokens ≈ 768×1152×49) refuses
-larger decodes until upstream's tiling is ported. Decoder noise seed = `seed + 30000`; not
+Single tile in v1: `LTX2_DIFFVAE_MAX_TOKENS` (default 1,204,224 stage-5 tokens = 512×768×49, the
+largest shape validated end to end) refuses larger decodes until upstream's tiling is ported. Decoder noise seed = `seed + 30000`; not
 bit-comparable with torch's generator. Parity: per-stage torch goldens
 (`tests/parity_diffvae_reference.py`, disposable env) at 1e-4 (det stages) / 1e-3 (diffusion).
 Conv stays the default. Key files: `model/video_vae/diffusion_decoder/`, `utils/blocks.py::_DiffusionVideoDecoder`.
 
-E2E validated on the 2.5 q8 pack (M2 Pro 32 GB, `--low-ram`, 384×576×25, distilled two-stage,
-seed 5): conv 93.4s total (2.6s decode phase, ~11.8 GB peak RSS) vs diffusion 129.4s total
+E2E validated on the 2.5 q8 pack (M2 Pro 32 GB, `--low-ram`, distilled two-stage, seed 5).
+At 384×576×25: conv 93.4s total (2.6s decode phase, ~11.8 GB peak RSS) vs diffusion 129.4s total
 (39.1s decode phase, ~10.4 GB peak RSS); PSNR conv-vs-diffusion 39.25 dB, diffusion frame
-visibly sharper on fine edges (flower petals) at matched latents/seed. At 512×768×25 the
-stage-5 neighborhood-attention kernel currently exceeds a Metal buffer-count limit
-(`[metal::malloc] Resource limit (499000) exceeded`, separate from the `LTX2_DIFFVAE_MAX_TOKENS`
-size guard) — known v1 ceiling, tracked for the tiling follow-up (PR B).
+visibly sharper on fine edges (flower petals) at matched latents/seed. Larger diffusion decodes
+also complete: 512×768×25 (614,400 stage-5 tokens) in 175.3s total / 50.8s decode phase /
+~11.3 GB peak RSS, and 512×768×49 (1,204,224 tokens) in 289.8s total / 102.5s decode phase /
+~10.5 GB peak RSS. `na3d` materializes its accumulator once per block group, which bounds live
+Metal buffers and is what lifted the earlier `[metal::malloc] Resource limit (499000) exceeded`
+ceiling. 512×768×49 is the largest shape measured and is now the `LTX2_DIFFVAE_MAX_TOKENS`
+default; beyond it the single-tile decode is unverified (tiling follow-up, PR B).
 
 ### Key Files
 
