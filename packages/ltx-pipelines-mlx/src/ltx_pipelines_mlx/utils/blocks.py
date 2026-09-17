@@ -71,13 +71,17 @@ from ltx_core_mlx.utils.weights import load_split_safetensors, remap_audio_vae_k
 from ltx_pipelines_mlx.utils.types import AutoDuration
 
 if TYPE_CHECKING:
+    from ltx_core_mlx.model.video_vae.diffusion_decoder import NADiffusionDecoder
     from ltx_core_mlx.text_encoders.gemma.encoders.gemma4_encoder import Gemma4TextEncoder
 
 logger = logging.getLogger(__name__)
 
 #: Env var overriding the diffusion decoder's stage-5 token-count guard.
 DIFFVAE_MAX_TOKENS_ENV = "LTX2_DIFFVAE_MAX_TOKENS"
-DIFFVAE_MAX_TOKENS_DEFAULT = 2_500_000
+#: Largest stage-5 token count validated end to end (512x768x49 on an M2 Pro 32 GB:
+#: 49 x 128 x 192). Above it the single-tile decode is unverified; raise via
+#: ``LTX2_DIFFVAE_MAX_TOKENS`` if you have the memory.
+DIFFVAE_MAX_TOKENS_DEFAULT = 1_204_224
 #: Valid ``--video-decoder`` / ``VideoDecoder(video_decoder=...)`` choices.
 VIDEO_DECODER_CHOICES = ("conv", "diffusion")
 
@@ -280,7 +284,7 @@ class _DiffusionVideoDecoder:
     :class:`VideoDecoder` can dispatch to either interchangeably.
     """
 
-    def __init__(self, decoder) -> None:
+    def __init__(self, decoder: NADiffusionDecoder) -> None:
         self._decoder = decoder
 
     @staticmethod
@@ -313,7 +317,8 @@ class _DiffusionVideoDecoder:
         """Stream-decode ``video_latent`` into ``output_path`` with optional audio mux."""
         self.check_size(tuple(video_latent.shape))
         _, _, _f, h, w = video_latent.shape
-        cmd = build_ffmpeg_command(find_ffmpeg(), w * 32, h * 32, frame_rate, audio_path, output_path)
+        sh, sw = self._decoder.spatial_scale
+        cmd = build_ffmpeg_command(find_ffmpeg(), w * sw, h * sh, frame_rate, audio_path, output_path)
         with _ffmpeg_sink(cmd) as proc:
             stream_chunks_to_ffmpeg(self._decoder.tiled_decode(video_latent, seed=seed), proc)
         return output_path
